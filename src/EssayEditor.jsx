@@ -17,6 +17,7 @@ export function EssayEditor({essay,setEssay,consent,setConsent,busy,onSubmit,onD
       <label className="consent"><input type="checkbox" checked={consent} disabled={busy} onChange={e=>setConsent(e.target.checked)}/><span>我同意将正文发送至 TypeSafe 进行评价。<a href="#privacy">隐私说明</a></span></label>
       <div className="actions"><button className="button primary" type="submit" disabled={busy||ready===false}>{busy?<><span className="spinner"/>Jev 正在评价…</>:'开始评价'}</button><button className="button secondary" type="button" disabled={busy} onClick={onDemo}>查看示例</button></div>
       <p className="microcopy">正文仅用于本次评价，不保存在本站。</p>
+      <p className="microcopy">每个浏览器每日免费 3 次，北京时间 00:00 恢复。评价失败不扣次数，同一校园网可分别使用。</p>
       <p className="input-hint">支持英文本科个人文书，最多 3,000 words。请去掉姓名、联系方式与文外评价。</p>
       {ready===false&&<p className="notice">评价服务尚未配置完成。你仍可以查看示例和完整评分标准。</p>}
       {error&&<p role="alert" className="error-message">{error}</p>}

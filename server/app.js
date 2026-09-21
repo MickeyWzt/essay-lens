@@ -1,12 +1,28 @@
 import express from 'express';
 import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
+import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { buildRequest, parseEvaluation, validateEssay, rubric, rubricVersion, rubricHash } from './evaluation.js';
 
-export function createApp({ apiKey = process.env.TYPESAFE_API_KEY, fetchImpl = fetch, dailyLimit = Number(process.env.DAILY_EVALUATION_LIMIT || 100), rateMax = 6 } = {}) {
+export function createApp({ apiKey = process.env.TYPESAFE_API_KEY, fetchImpl = fetch, dailyLimit = Number(process.env.DAILY_EVALUATION_LIMIT || 100), rateMax = 60, now = Date.now } = {}) {
   const app = express();
   let day = '', used = 0, inFlight = 0;
+  let visitorDay = '';
+  const visitorCounts = new Map();
+  const cookieSecret = randomBytes(32);
+  const sign = id => createHmac('sha256', cookieSecret).update(id).digest('hex');
+  function identifyBrowser(req, res, next) {
+    const token = (req.headers.cookie || '').split(';').map(v=>v.trim()).find(v=>v.startsWith('essay_browser='))?.slice('essay_browser='.length);
+    const [id, signature] = (token || '').split('.');
+    if (/^[a-f0-9]{32}$/.test(id || '') && /^[a-f0-9]{64}$/.test(signature || '') && timingSafeEqual(Buffer.from(signature,'hex'),Buffer.from(sign(id),'hex'))) {
+      req.visitorId = id;
+    } else {
+      const newId = randomBytes(16).toString('hex');
+      res.cookie('essay_browser', `${newId}.${sign(newId)}`, { httpOnly:true, sameSite:'lax', secure:req.secure, maxAge:30*24*60*60*1000, path:'/' });
+    }
+    next();
+  }
   app.disable('x-powered-by');
   // Render terminates TLS and appends the client address at its reverse proxy.
   app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
@@ -14,20 +30,33 @@ export function createApp({ apiKey = process.env.TYPESAFE_API_KEY, fetchImpl = f
   app.use('/api', (_req,res,next) => {res.set('Cache-Control','no-store');next();});
   app.use(express.json({ limit: '80kb' }));
   app.get('/health', (_req,res) => res.json({ status: 'ok' }));
-  app.get('/api/config', (_req,res) => res.json({ ready: Boolean(apiKey), model: rubric.model, rubricVersion, maxChars:18000, maxWords:3000 }));
+  app.get('/api/config', identifyBrowser, (_req,res) => res.json({ ready: Boolean(apiKey), model: rubric.model, rubricVersion, maxChars:18000, maxWords:3000, dailyFreeLimit:3, quotaTimezone:'Asia/Shanghai', quotaScope:'browser', quotaPersistence:'memory' }));
   app.get('/api/rubric', (_req,res) => res.json({ ...rubric, rubricVersion, rubricHash }));
-  const limiter = rateLimit({ windowMs: 60*60*1000, limit: rateMax, standardHeaders: 'draft-8', legacyHeaders: false, message: {error:'当前网络每小时最多评价 6 次，请稍后再试。'} });
-  app.post('/api/evaluate', limiter, async (req,res) => {
+  const limiter = rateLimit({ windowMs: 60*60*1000, limit: rateMax, standardHeaders: 'draft-8', legacyHeaders: false, message: {error:'当前网络请求过于频繁，请稍后再试。'} });
+  app.post('/api/evaluate', limiter, identifyBrowser, async (req,res) => {
     const origin = req.get('origin');
     if (origin) { try { if (new URL(origin).host !== req.get('host')) return res.status(403).json({error:'请从本站页面提交评价。'}); } catch {return res.status(403).json({error:'无效请求来源。'});} }
     const invalid = validateEssay(req.body);
     if (invalid) return res.status(400).json({error:invalid});
+    if (!req.visitorId) return res.status(400).json({error:'浏览器额度标识已更新，请再次点击评价。请允许本站使用必要 Cookie。',code:'BROWSER_SESSION_REQUIRED'});
     if (!apiKey) return res.status(503).json({error:'评价服务尚未配置完成，请稍后再试。示例与评分标准仍可查看。'});
-    const today = new Date().toISOString().slice(0,10);
+    const timestamp = now();
+    const localDay = new Date(timestamp + 8*60*60*1000).toISOString().slice(0,10);
+    if (localDay !== visitorDay) { visitorDay = localDay; visitorCounts.clear(); }
+    const visitorKey = req.visitorId;
+    const visitor = visitorCounts.get(visitorKey) || { used:0 };
+    if (visitor.used >= 3) {
+      const resetAt = Date.parse(`${localDay}T00:00:00+08:00`) + 24*60*60*1000;
+      res.set('Retry-After', String(Math.max(1, Math.ceil((resetAt-timestamp)/1000))));
+      return res.status(429).json({error:'当前浏览器今日的 3 次免费评价已用完，北京时间明天 00:00 恢复。',code:'DAILY_FREE_LIMIT'});
+    }
+    const today = new Date(timestamp).toISOString().slice(0,10);
     if (today !== day) {day=today;used=0;}
     if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || used >= dailyLimit) return res.status(429).json({error:'本站本日的评价额度已用完，请明天再来。'});
     if (inFlight >= 3) return res.status(429).json({error:'现在有较多文书正在评价，请稍后重试。'});
     used++; inFlight++;
+    visitor.used++; visitorCounts.set(visitorKey, visitor);
+    let completed = false;
     try {
       const upstream = await fetchImpl('https://api.typesafe.ai/v1/systemone', {method:'POST',headers:{Authorization:`Bearer ${apiKey}`,'Content-Type':'application/json'},body:JSON.stringify(buildRequest(req.body.essay.trim())),signal:AbortSignal.timeout(45000)});
       if (!upstream.ok) {
@@ -35,10 +64,11 @@ export function createApp({ apiKey = process.env.TYPESAFE_API_KEY, fetchImpl = f
         return res.status(502).json({error});
       }
       const result = parseEvaluation(await upstream.json());
+      completed = true;
       res.json(result);
     } catch (error) {
       res.status(error.name === 'TimeoutError' ? 504 : 502).json({error: error.name === 'TimeoutError' ? '本次评价超时，请稍后重试。' : '未能取得完整的六维评分，请稍后重试。'});
-    } finally { inFlight--; }
+    } finally { inFlight--; if (!completed) visitor.used--; }
   });
   app.use('/api', (_req,res) => res.status(404).json({error:'接口不存在。'}));
   app.use(express.static(fileURLToPath(new URL('../dist', import.meta.url))));
