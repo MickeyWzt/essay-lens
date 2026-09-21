@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: essay-lens
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.16.0
+      - key: TYPESAFE_API_KEY
+        sync: false
+      - key: DAILY_EVALUATION_LIMIT
+        value: 100
+      - key: TRUST_PROXY_HOPS
+        value: 1

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+design/*.png
+design/playwright.config.json
+design/qa-*
+test-results/
