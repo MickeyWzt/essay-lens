@@ -6,6 +6,8 @@ A Chinese-language public workspace for evaluating English undergraduate persona
 
 Node 22.16+; `npm ci`, `npm run build`, set `TYPESAFE_API_KEY` in the environment, then `npm start`. Open http://localhost:3100. For frontend development run `npm run dev` alongside the server. `npm test` checks the API contract, validation, aggregation, rate limits, privacy and upstream failure paths.
 
+GitHub Actions runs `npm ci`, `npm audit --audit-level=high`, `npm test` and `npm run build` on Node 22 for pushes to `main` and pull requests targeting `main`. The tests use a mocked provider and do not require `TYPESAFE_API_KEY` or make live Jev requests.
+
 ## Render
 
 Deploy this directory as its own repository. Node web service, Singapore, free instance, `npm ci --include=dev && npm run build`, `npm start`, health check `/health`. `render.yaml` is also supplied. Set `TYPESAFE_API_KEY` as a private server environment variable. Never put it in a Vite variable or commit it. The frontend never receives this key.
